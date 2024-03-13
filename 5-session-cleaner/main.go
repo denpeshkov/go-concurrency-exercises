@@ -20,17 +20,21 @@ package main
 import (
 	"errors"
 	"log"
+	"sync"
+	"time"
 )
 
 // SessionManager keeps track of all sessions from creation, updating
 // to destroying.
 type SessionManager struct {
 	sessions map[string]Session
+	mu       sync.RWMutex
 }
 
 // Session stores the session's data
 type Session struct {
-	Data map[string]interface{}
+	Data   map[string]interface{}
+	expiry time.Time
 }
 
 // NewSessionManager creates a new sessionManager
@@ -39,7 +43,24 @@ func NewSessionManager() *SessionManager {
 		sessions: make(map[string]Session),
 	}
 
+	go func() {
+		for range time.Tick(1 * time.Second) {
+			m.cleanUp()
+		}
+	}()
+
 	return m
+}
+
+func (m *SessionManager) cleanUp() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	for k, v := range m.sessions {
+		if !v.expiry.IsZero() && !v.expiry.After(now) {
+			delete(m.sessions, k)
+		}
+	}
 }
 
 // CreateSession creates a new session and returns the sessionID
@@ -49,8 +70,11 @@ func (m *SessionManager) CreateSession() (string, error) {
 		return "", err
 	}
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.sessions[sessionID] = Session{
-		Data: make(map[string]interface{}),
+		Data:   make(map[string]interface{}),
+		expiry: time.Now().Add(5 * time.Second),
 	}
 
 	return sessionID, nil
@@ -63,6 +87,8 @@ var ErrSessionNotFound = errors.New("SessionID does not exists")
 // GetSessionData returns data related to session if sessionID is
 // found, errors otherwise
 func (m *SessionManager) GetSessionData(sessionID string) (map[string]interface{}, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	session, ok := m.sessions[sessionID]
 	if !ok {
 		return nil, ErrSessionNotFound
@@ -72,14 +98,16 @@ func (m *SessionManager) GetSessionData(sessionID string) (map[string]interface{
 
 // UpdateSessionData overwrites the old session data with the new one
 func (m *SessionManager) UpdateSessionData(sessionID string, data map[string]interface{}) error {
-	_, ok := m.sessions[sessionID]
-	if !ok {
-		return ErrSessionNotFound
+	if _, err := m.GetSessionData(sessionID); err != nil {
+		return err
 	}
 
 	// Hint: you should renew expiry of the session here
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.sessions[sessionID] = Session{
-		Data: data,
+		Data:   data,
+		expiry: time.Now().Add(5 * time.Second),
 	}
 
 	return nil
